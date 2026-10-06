@@ -1,6 +1,6 @@
 ---
 title: Overview
-lastUpdated: 2026-09-30
+lastUpdated: 2026-10-06
 description: Release notes and version history for fullstackhero.
 sidebar:
   order: 1
@@ -10,6 +10,14 @@ seo:
 ---
 
 Notable changes to the kit, newest first.
+
+## Unreleased - Proposed Fix (2026-10-06)
+
+This entry describes [backend commit 9e7eca14](https://github.com/HiroshiYoshino/dotnet-starter-kit/commit/9e7eca147551789f525610d12aa0c5f94913e37c). These documentation changes accompany a **proposed, unreleased fix**, not a release announcement. Deploy the matching backend implementation before relying on the new dispatch contract.
+
+- **Eventing: resolve the full event tenant before constructing InMemory consumers (proposed fix).** An ID-only context lost dedicated connection metadata, sending tenant-aware handlers and Inbox to default even when the Outbox was correctly drained from a dedicated database. `InMemoryEventBus` now uses `IEventTenantScope.ExecuteAsync`; the Finbuckle implementation queries the default tenant catalog, disposes its lookup scope, and installs full metadata before constructing the consumer scope. Webhook fanout no longer replaces that context with an ID-only one. Source claim/completion/retry/dead-letter updates stay in the original Outbox database. Files for dedicated T route to T; root Renew from default routes tenant-aware consumers and Inbox to T while Billing business tables stay central/default. Default drain explicitly resets the connection rather than inheriting the caller's dedicated one.
+- **Compatibility and rejected tenants.** `Begin`, its two-argument constructor, and the interface's default synchronous bridge remain. Same-ID `Begin` retains full metadata; different-ID `Begin` remains ID-only, so custom dispatchers should migrate to the async callback. Global async dispatch uses a minimal root/default context, not root catalog metadata, while Inbox retains null. Unknown/deleted or inactive tenants are rejected before handlers/Inbox; drainable source rows retry and dead-letter, but inactive/deleted-only dedicated databases are still excluded from automatic drains.
+- **Upgrade and delivery limits.** No schema migration, configuration change, distributed transaction, exactly-once guarantee, or automatic repair of old misrouted records is introduced. Back up and reconcile historical business/Inbox state before source-side redrive, and review excluded databases explicitly. `InMemory` still uses persistent EF Outbox/Inbox. API success and Outbox processed do not prove Webhook HTTP delivery; a business-write-to-Inbox crash can repeat side effects. See [Eventing routing, recovery, and guarantees](/docs/building-blocks/eventing/#source-and-consumer-routing) and [the async contract](/docs/building-blocks/eventing-abstractions/#what-it-ships).
 
 ## 2026-09-30
 

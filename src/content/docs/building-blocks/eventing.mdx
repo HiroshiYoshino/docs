@@ -1,6 +1,6 @@
 ---
 title: Eventing building block
-lastUpdated: 2026-08-07
+lastUpdated: 2026-10-06
 description: Event bus implementation (InMemory or RabbitMQ), outbox/inbox stores for durable delivery, and the open-generic handler registration that lets modules subscribe with one method.
 sidebar:
   label: Eventing
@@ -12,10 +12,22 @@ seo:
   keywords: '.net event bus, rabbitmq dotnet integration events, outbox pattern ef core, inbox idempotency .net, in-memory event bus dotnet'
 ---
 
-The Eventing block is the runtime side of the kit's integration-event story. It ships two `IEventBus` implementations - `InMemoryEventBus` (synchronous, in-process) and `RabbitMqEventBus` (durable, cross-service) - an EF Core-backed outbox store for transactional delivery, an inbox store for receiver-side idempotency, a `JsonEventSerializer`, and the auto-discovery hook that registers every `IIntegrationEventHandler<TEvent>` in your module assemblies.
+The Eventing block is the runtime side of the kit's integration-event story. It ships two `IEventBus` implementations - `InMemoryEventBus` (awaited, in-process) and `RabbitMqEventBus` (durable, cross-service) - an EF Core-backed outbox store for transactional delivery, an inbox store for receiver-side idempotency, a `JsonEventSerializer`, and the auto-discovery hook that registers every `IIntegrationEventHandler<TEvent>` in your module assemblies.
 
-<Callout type="tip" title="Outbox + Inbox = exactly-once you can trust">
-Publish goes through the outbox in the same transaction as your business write. A background dispatcher hands it to RabbitMQ. The receiver's inbox dedupes by event id, so if the broker redelivers (network blip, consumer crash) the handler doesn't fire twice. Two stores, one obvious pattern.
+<Callout type="note" title="Proposed dispatch contract, not a released feature">
+  The resolved-tenant dispatch contract below describes [backend commit
+  9e7eca14](https://github.com/HiroshiYoshino/dotnet-starter-kit/commit/9e7eca147551789f525610d12aa0c5f94913e37c).
+  These documentation changes accompany the proposed backend fix; they are not a
+  release announcement. Deploy the matching backend implementation before
+  relying on this contract.
+</Callout>
+
+<Callout type="tip" title="Durable delivery with explicit limits">
+  Outbox delivery is at-least-once. When the business write and outbox write
+  share an explicit transaction, they commit together. With the in-process bus
+  and Inbox enabled, a recorded completion suppresses a later delivery to that
+  handler. A crash after a business write but before Inbox insertion can repeat
+  the side effect; this is not distributed-transaction or exactly-once delivery.
 </Callout>
 
 ## What it ships
@@ -27,7 +39,7 @@ Publish goes through the outbox in the same transaction as your business write. 
 
 ### Event bus implementations
 
-- **`InMemoryEventBus`** - in-process. For each event it **sets the tenant context first** (`IEventTenantScope.Begin(event.TenantId)`), creates a fresh DI scope, resolves the matching handlers, checks the inbox (skip if already processed by that handler), awaits each handler in order, then marks the inbox row. Great for dev/test and single-process production hosts.
+- **`InMemoryEventBus`** - in-process. For each event it calls `IEventTenantScope.ExecuteAsync(event.TenantId, action, ct)` and creates the consumer DI scope **inside the action, after tenant resolution**. It resolves the matching handlers and Inbox, skips recorded completions, awaits each handler, then records completion. `InMemory` selects the delivery method: the EF Core Outbox/Inbox are still database tables, not memory-only storage. The resolved-tenant behavior is part of the proposed Green change above.
 - **`RabbitMqEventBus`** - durable, cross-service; uses `RabbitMQ.Client` and publishes to a durable topic exchange (`EventingOptions:RabbitMQ`).
 
 ### Outbox / inbox
@@ -35,7 +47,7 @@ Publish goes through the outbox in the same transaction as your business write. 
 - **`EventingDbContext`** - the single, framework-owned context that maps `OutboxMessages` and `InboxMessages` into schema **`framework`**. It derives from `BaseDbContext`, so it follows the tenant connection: a tenant with a dedicated database gets its outbox rows in that database, beside the business data they accompany.
 - **`IOutboxWriter`** (`AddAsync`) - the publish-side contract, in `Eventing.Abstractions`. **This is what a module injects**; it never touches the eventing runtime.
 - **`IOutboxStore`** (`IOutboxWriter` + `ClaimBatchAsync`, `MarkAsProcessedAsync`, `MarkAsFailedAsync`, `GetDeadLetteredAsync`, `RedriveDeadLettersAsync`) + `EfCoreOutboxStore` - the dispatcher-side surface. `AddAsync` joins the caller's transaction when one is open, so the event commits or rolls back with the business write; with no transaction it commits on its own.
-- **`IInboxStore`** + `EfCoreInboxStore` - dedupe table keyed by **(event id, handler name)**, so each handler processes an event at most once.
+- **`IInboxStore`** + `EfCoreInboxStore` - dedupe table keyed by **(event id, handler name)**. A recorded success suppresses redelivery to that handler; it does not atomically commit the handler's business writes with the Inbox row.
 - **`OutboxDispatcher`** - scoped service; **claims** a batch (`OutboxBatchSize`, default 100) with a lease, deserializes, publishes via `IEventBus`, marks processed. A failing row increments `RetryCount` and backs off exponentially (`NextRetryAt`); after `OutboxMaxRetries` (default 5) it's flagged `IsDead`.
 - **`OutboxDispatcherHostedService`** - background loop calling the dispatcher every `OutboxDispatchIntervalSeconds` (default 10), once per **drain target** (see below).
 - **`OutboxMessage`** - `Id`, `CreatedOnUtc`, `Type`, `Payload`, `TenantId`, `CorrelationId`, `ProcessedOnUtc`, `RetryCount`, `LastError`, `IsDead`, `NextRetryAt`, `ClaimedUntilUtc`, `ClaimedBy`. Implements `IGlobalEntity` (background processors must scan across tenants).
@@ -50,6 +62,52 @@ Publish goes through the outbox in the same transaction as your business write. 
 Because outbox rows follow the tenant connection, the dispatcher can't poll a single database. Each cycle it asks **`IEventingDrainTargetProvider`** which databases to drain and runs one pass per target inside **`IEventingDrainScope`**, which installs the tenant context *before* the scope builds its `EventingDbContext` (that context captures `TenantInfo`, and with it the connection string, at construction). BuildingBlocks defaults to a single target; the Multitenancy module replaces it with the default database plus one target per distinct **active** per-tenant connection string - tenants sharing a database collapse to one pass. An unreachable tenant database is logged and skipped, never fatal to the cycle.
 
 `ClaimBatchAsync` leases rows with Postgres `FOR UPDATE SKIP LOCKED` in one `UPDATE … RETURNING`, so several API instances partition a batch instead of all publishing the same message. The lease is an expiry (`OutboxClaimLeaseSeconds`, default 300), so a dispatcher that dies mid-batch has its rows recovered rather than stranded. Providers without `SKIP LOCKED` fall back to an unclaimed read and log a warning that only one instance is safe.
+
+## Source and consumer routing
+
+The **source database** holds the Outbox row. Its drain scope is responsible for claiming the row and writing processed, retry, or dead-letter state back to that same database. A default drain explicitly installs a root context with no dedicated connection, even when its caller previously had a dedicated tenant context.
+
+The **consumer database** is selected independently from the event's `TenantId`. In the proposed Finbuckle implementation, `ExecuteAsync` uses a short-lived scoped `EventTenantResolver` to read the full `AppTenantInfo` from the **default tenant catalog**, without tracking and with cancellation propagated. The lookup scope is disposed before the action starts. The full context, including its connection string, is installed before a new consumer scope constructs handlers, tenant-aware DbContexts, or Inbox.
+
+| Workflow                                 | Source Outbox          | Consumer business data                                             | Framework Inbox                                                     |
+| ---------------------------------------- | ---------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------- |
+| Files event for dedicated tenant T       | T's dedicated DB       | Tenant-aware consumers use T's DB                                  | T's DB, `TenantId = T`                                              |
+| Root operator renews dedicated tenant T  | Default DB             | Tenant-aware consumers use T's DB; Billing remains central/default | T's DB, `TenantId = T`                                              |
+| Tenant S shares T's database             | Shared physical DB     | Same physical DB, but full catalog context for S                   | Shared DB, `TenantId = S`                                           |
+| Global event (null/whitespace tenant ID) | The original source DB | Root/default for tenant-aware consumers                            | Default DB; a null event `TenantId` remains a null Inbox `TenantId` |
+
+Billing's `BillingDbContext` intentionally remains central/default; it does not inherit tenant connection routing. A Billing consumer running in T's context therefore writes subscriptions and invoices to default while its framework Inbox is in T's dedicated database. Do not infer a consumer's business-table location from its Inbox location alone.
+
+### Resolution, rejection, and restoration
+
+- **Active known tenant:** use the catalog's full metadata, including a dedicated or shared connection, name, and plan.
+- **Unknown/deleted tenant or inactive tenant:** reject before constructing handlers or Inbox. Do not silently fall back to default. If the source row is being drained, the dispatcher records failure there and retries up to its dead-letter limit.
+- **Global event:** install a minimal root context (`Id`/`Identifier = root`, active, no dedicated connection). This is not a catalog lookup of root; its actual plan, name, and active flag are not loaded. Global Webhook fanout remains skipped, and the Inbox retains the event's tenant value.
+- **After success, error, or cancellation:** restore the previous ambient context. The context and awaited callback stay in the same async flow; setting AsyncLocal in an awaited helper and returning a handle is not a safe substitute.
+
+The drain provider still enumerates only default and distinct **active** dedicated connections. A database used exclusively by an inactive or deleted tenant may never be visited, so rejection does **not** guarantee eventual dead-lettering. Another active tenant sharing that database can make it drainable. Review excluded databases explicitly rather than treating absent retry activity as success.
+
+### Compatibility and custom dispatchers
+
+The synchronous `Begin` API and original two-argument Finbuckle constructor remain available. `Begin` preserves full ambient metadata when the ID matches, restores nested changes on disposal, and leaves context unchanged for a null/whitespace ID. Switching to a different ID synchronously retains legacy **ID-only** behavior: it does not resolve a dedicated connection and can route custom callers to default.
+
+Use `ExecuteAsync` for asynchronous event dispatch and construct all consumer services inside its callback. The interface's default implementation wraps the existing `Begin`, so existing synchronous or no-op implementations continue to compile; the bridge alone does not provide full catalog resolution or Finbuckle's global/default policy. Review custom `IEventTenantScope` implementations and buses when upgrading. These guarantees describe the InMemory path, not a newly implemented RabbitMQ receiver.
+
+## Delivery status and recovery
+
+An API success, a processed Outbox row, and an HTTP Webhook delivery are different milestones. The request can commit before any consumer executes. Outbox processed means the configured bus publish completed; for InMemory, its invoked handlers completed, but Webhook fanout only creates/enqueues delivery work. It does not prove that a remote endpoint accepted an HTTP request. Enqueue errors handled by the fanout can also allow its handler to complete. Check delivery/job status separately.
+
+If consumer success and Inbox insertion commit but updating the **source** Outbox fails, redelivery checks the **destination** Inbox and suppresses completed handlers. If the handler commits a business write and crashes **before** Inbox insertion, the handler may run again. Concurrent deliveries and nontransactional external effects also need handler-level idempotency; the Inbox key is not a distributed exactly-once guarantee.
+
+### Upgrade and operator review
+
+This dispatch fix adds no schema migration, new configuration, distributed transaction, or automatic repair of existing data. Apply the normal migrator process for other pending changes, but do not invent a migration for this one.
+
+1. Deploy the matching backend implementation before relying on this contract. Verify default catalog access, dedicated/shared connections, and consumer construction order in your environment.
+2. Monitor source Outbox pending, retry, lease, and dead-letter state in **each** default/dedicated database. Correlate by event ID and handler name, not just by tenant or HTTP status. Include inactive/deleted-only databases in a controlled operator audit.
+3. Review historical business writes and Inbox records that may have landed in default instead of the intended tenant database. Back up affected databases. Reconcile business effects and per-handler completion records before redelivery: a completion in the old default Inbox will not suppress a handler now checking the correct dedicated Inbox. There is no generic safe SQL move/delete procedure in this change.
+4. Resolve the underlying catalog/connection/handler problem, then explicitly redrive appropriate dead letters using `RedriveDeadLettersAsync` under their **source** connection. Do not reactivate a tenant merely to drain events without an operational/security decision; do not blindly replay deleted-tenant events or clear Inbox records.
+5. Confirm destination business state, destination Inbox, source completion, and any separately scheduled Webhook HTTP delivery. Publish only redacted diagnostics; omit passwords, tokens, and complete connection strings.
 
 ## How modules consume Eventing
 
@@ -77,7 +135,7 @@ public async ValueTask<Unit> Handle(ResolveTicketCommand cmd, CancellationToken 
 }
 ```
 
-**Delivery is asynchronous.** The consumer runs in the dispatcher's scope on the next cycle, not inside your request - so its failures never reach your caller, and no caller (or test) should assume the side effect has already happened.
+**Delivery is asynchronous.** On the next cycle, the InMemory bus constructs a separate consumer scope after resolving the event tenant, not inside your HTTP request. Consumer failures update the source Outbox rather than that earlier HTTP response, and no caller (or test) should assume the side effect has already happened.
 
 Calling `IEventBus.PublishAsync` directly runs handlers immediately, in-process, but the event is neither durable nor transactional. The kit does this in exactly one place: Chat mention notifications, where the handler pushes over SignalR and a delayed badge reads as broken. Prefer the outbox everywhere else.
 
@@ -158,7 +216,7 @@ Replace `IEventingDrainTargetProvider` (and `IEventingDrainScope` if the target 
 - **`OutboxClaimLeaseSeconds` must exceed the worst-case time to publish a batch.** If a batch can outlive its lease, another instance re-claims rows still in flight and publishes them twice.
 - **A background publisher must set the tenant context before `AddAsync`,** not just before the publish - with per-tenant databases the row otherwise lands in the wrong database and is drained under the wrong target.
 - **Inbox dedupes per handler, by `(EventId, HandlerName)`.** A redelivered event is skipped only for handlers that already completed it; if you mint two events with the same `Id`, the second is silently dropped for every handler. Always generate a fresh `Guid` per event.
-- **Background publishers need the tenant context set.** `InMemoryEventBus` does this for you via `IEventTenantScope` (reading `event.TenantId`) *before* resolving handlers - a `MultiTenantDbContext` captures its tenant at construction, so setting it later is too late. If you build your own bus or dispatch path, preserve this ordering or tenant-filtered handlers NRE.
+- **Background consumers need the full tenant context first.** The proposed InMemory path does this via `IEventTenantScope.ExecuteAsync` _before_ constructing its consumer scope. Tenant-aware DbContexts capture tenant information at construction; changing it afterwards cannot repair a wrong connection. `WebhookFanoutHandler` uses the bus-established context rather than replacing it with an ID-only context; standalone delivery jobs still own their context setup.
 - **RabbitMQ publishing retries in-process** (`PublishRetryCount` / `PublishRetryDelayMs`), but consumers own their durability via inbox + retry semantics.
 
 ## Critical files

@@ -1,6 +1,6 @@
 ---
 title: Webhooks module
-lastUpdated: 2026-06-11
+lastUpdated: 2026-10-06
 description: Tenant-scoped webhook subscriptions, open-generic event fan-out, HMAC-signed delivery with secrets encrypted at rest, permission-gated endpoints, Hangfire dispatch with exponential backoff, and a delivery audit log.
 sidebar:
   label: Webhooks
@@ -14,6 +14,13 @@ seo:
 
 The Webhooks module turns every integration event your kit publishes into an outbound HTTP delivery to subscribed tenants. Tenants register a URL + an event list (with `*` wildcard support), the module fans events using an open-generic `IIntegrationEventHandler<>`, signs payloads with HMAC-SHA256, and delivers via Hangfire jobs with exponential-backoff retry and a delivery log for audit. Around **1,100 lines of code in the runtime project**.
 
+<Callout type="note" title="Proposed dispatch contract, not a released feature">
+  The fanout context ownership described below matches [backend commit
+  9e7eca14](https://github.com/HiroshiYoshino/dotnet-starter-kit/commit/9e7eca147551789f525610d12aa0c5f94913e37c).
+  These documentation changes accompany the proposed backend fix; they are not a
+  release announcement. The standalone HTTP delivery job is unchanged.
+</Callout>
+
 <Callout type="tip" title="Webhooks-as-a-feature, for free">
 You publish integration events anyway (Chat does, Identity does, Files does). The Webhooks module is the configuration layer that lets *your tenants* opt into those events being delivered to their systems - no per-event wiring on your side.
 </Callout>
@@ -24,7 +31,7 @@ You publish integration events anyway (Chat does, Identity does, Files does). Th
 - **Signing secret encrypted at rest** - the secret is the HMAC key, so it must stay recoverable (a one-way hash would make signing impossible). It is encrypted with ASP.NET Data Protection (`IWebhookSecretProtector`) on create and decrypted only at sign time, so a database breach never exposes plaintext secrets.
 - **Permission-gated endpoints** - `Webhooks.View` / `Create` / `Delete` / `Test` (previously authentication-only).
 - **Open-generic event handler** - one `WebhookFanoutHandler<TEvent>` registered for every `IIntegrationEvent`; no per-event setup needed. When a new module publishes a new event, existing subscriptions automatically receive it.
-- **Tenant context restoration** - the fanout handler explicitly restores the tenant context before querying subscriptions, so Finbuckle's global query filter sees the right tenant. (This is the single most important gotcha - see below.)
+- **Bus-owned tenant context** - in the proposed InMemory path, the bus resolves full tenant metadata before constructing the fanout handler and its DbContext. Fanout requires a matching ambient tenant ID and does not replace the context with an ID-only object. The bus restores the previous context after dispatch.
 - **HMAC-SHA256 payload signing** - when `SecretHash` is set, every delivery includes `X-Webhook-Signature: sha256={hex}` so subscribers can verify authenticity.
 - **Hangfire delivery jobs** with `[AutomaticRetry]` - 5 attempts total, exponential backoff (30 s, 2 min, 10 min, 1 h).
 - **Transient vs permanent error classification** - 5xx, 408, 429 retried; other 4xx permanent.
@@ -70,15 +77,15 @@ public sealed class WebhookFanoutHandler<TEvent> : IIntegrationEventHandler<TEve
 
     public async Task HandleAsync(TEvent @event, CancellationToken ct = default)
     {
+        ArgumentNullException.ThrowIfNull(@event);
         if (string.IsNullOrWhiteSpace(@event.TenantId)) return;   // skip platform-wide events
 
-        // Install the tenant context for the subscription read, restore the previous one after.
-        var prev = _tenantContextAccessor.MultiTenantContext;
-        try
+        if (!string.Equals(_tenantContextAccessor.MultiTenantContext.TenantInfo?.Id,
+            @event.TenantId, StringComparison.Ordinal))
         {
-            var info = new AppTenantInfo(@event.TenantId, @event.TenantId);
-            ((IMultiTenantContextSetter)_tenantContextAccessor).MultiTenantContext =
-                new MultiTenantContext<AppTenantInfo>(info);
+            throw new InvalidOperationException(
+                "Webhook fan-out requires the event tenant to be resolved before handler construction.");
+        }
 
             var eventType = typeof(TEvent).Name;
             var subscriptions = await _db.Subscriptions
@@ -89,15 +96,21 @@ public sealed class WebhookFanoutHandler<TEvent> : IIntegrationEventHandler<TEve
             var matching = subscriptions.Where(s => s.MatchesEvent(eventType)).ToList();
             if (matching.Count == 0) return;
 
-            var payload = _serializer.Serialize(@event);
-            foreach (var subscription in matching)
+        var payload = _serializer.Serialize(@event);
+        foreach (var subscription in matching)
+        {
+            try
+            {
                 await _dispatcher
                     .EnqueueAsync(@event.TenantId, subscription.Id, eventType, payload, ct)
-                    .ConfigureAwait(false);   // one bad enqueue is caught + logged, fan-out continues
-        }
-        finally
-        {
-            ((IMultiTenantContextSetter)_tenantContextAccessor).MultiTenantContext = prev;
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex,
+                    "Failed to enqueue webhook delivery for subscription {SubscriptionId} (tenant {TenantId}, event {EventType})",
+                    subscription.Id, @event.TenantId, eventType);
+            }
         }
     }
 }
@@ -111,9 +124,20 @@ services.AddScoped(typeof(IIntegrationEventHandler<>), typeof(WebhookFanoutHandl
 
 The DI container materializes the handler for every event type the eventing system sees. Zero per-event code.
 
-<Callout type="warning" title="Restore tenant context manually">
-The handler installs the event's tenant into `IMultiTenantContextSetter` before querying subscriptions (and restores the previous context after). Without it, the Finbuckle query filter on `WebhookDbContext` filters away every row because the tenant context is null on the background event-bus thread. **This is the easiest thing to forget when adding a new handler.**
+<Callout
+  type="warning"
+  title="Resolve full context before constructing consumers"
+>
+  `WebhookDbContext` captures its tenant and connection at construction. In the
+  proposed InMemory path, `IEventTenantScope.ExecuteAsync` establishes full
+  catalog metadata before the consumer scope is built. Fanout must not install
+  an ID-only replacement or try to repair an already constructed context. Custom
+  buses must establish the same ordering; a matching ID alone does not prove a
+  correct connection. See [Eventing
+  routing](/docs/building-blocks/eventing/#source-and-consumer-routing).
 </Callout>
+
+Fanout completion is not HTTP delivery success. It reads matching active subscriptions and enqueues separate jobs; non-cancellation enqueue errors are logged without aborting the remaining fanout. A source Outbox can therefore become processed without every Webhook being delivered, or even successfully enqueued. Check job state and delivery logs separately. The dedicated-subscription routing tests observe this fanout, not a live remote HTTP endpoint.
 
 ## The delivery job
 
