@@ -7,25 +7,22 @@ sidebar:
   order: 7
 pageType: reference
 seo:
-  title: "HMAC-Signed Webhooks in .NET 10 - tenant subscriptions"
-  description: "Tenant-scoped webhook subscriptions in .NET 10: open-generic event fan-out, HMAC-SHA256 signed delivery, and Hangfire retry with a delivery audit log."
-  keywords: ".net webhook delivery, hmac signed webhooks dotnet, hangfire webhook retry, tenant scoped webhooks, open generic event handler"
+  title: 'HMAC-Signed Webhooks in .NET 10 - tenant subscriptions'
+  description: 'Tenant-scoped webhook subscriptions in .NET 10: open-generic event fan-out, HMAC-SHA256 signed delivery, and Hangfire retry with a delivery audit log.'
+  keywords: '.net webhook delivery, hmac signed webhooks dotnet, hangfire webhook retry, tenant scoped webhooks, open generic event handler'
 ---
 
 The Webhooks module turns every integration event your kit publishes into an outbound HTTP delivery to subscribed tenants. Tenants register a URL + an event list (with `*` wildcard support), the module fans events using an open-generic `IIntegrationEventHandler<>`, signs payloads with HMAC-SHA256, and delivers via Hangfire jobs with exponential-backoff retry and a delivery log for audit. Around **1,100 lines of code in the runtime project**.
 
 <Callout type="note" title="Proposed dispatch contract, not a released feature">
-    The fanout context ownership described below matches [backend commit
-    9e7eca14](https://github.com/HiroshiYoshino/dotnet-starter-kit/commit/9e7eca147551789f525610d12aa0c5f94913e37c).
-    These documentation changes accompany the proposed backend fix; they are not
-    a release announcement. The standalone HTTP delivery job is unchanged.
+  The fanout context ownership described below matches [backend commit
+  9e7eca14](https://github.com/HiroshiYoshino/dotnet-starter-kit/commit/9e7eca147551789f525610d12aa0c5f94913e37c).
+  These documentation changes accompany the proposed backend fix; they are not a
+  release announcement. The standalone HTTP delivery job is unchanged.
 </Callout>
 
 <Callout type="tip" title="Webhooks-as-a-feature, for free">
-  You publish integration events anyway (Chat does, Identity does, Files does).
-  The Webhooks module is the configuration layer that lets *your tenants* opt
-  into those events being delivered to their systems - no per-event wiring on
-  your side.
+You publish integration events anyway (Chat does, Identity does, Files does). The Webhooks module is the configuration layer that lets *your tenants* opt into those events being delivered to their systems - no per-event wiring on your side.
 </Callout>
 
 ## What ships in v10
@@ -90,14 +87,14 @@ public sealed class WebhookFanoutHandler<TEvent> : IIntegrationEventHandler<TEve
                 "Webhook fan-out requires the event tenant to be resolved before handler construction.");
         }
 
-        var eventType = typeof(TEvent).Name;
-        var subscriptions = await _db.Subscriptions
-            .AsNoTracking()
-            .Where(s => s.IsActive)
-            .ToListAsync(ct).ConfigureAwait(false);
+            var eventType = typeof(TEvent).Name;
+            var subscriptions = await _db.Subscriptions
+                .AsNoTracking()
+                .Where(s => s.IsActive)
+                .ToListAsync(ct).ConfigureAwait(false);
 
-        var matching = subscriptions.Where(s => s.MatchesEvent(eventType)).ToList();
-        if (matching.Count == 0) return;
+            var matching = subscriptions.Where(s => s.MatchesEvent(eventType)).ToList();
+            if (matching.Count == 0) return;
 
         var payload = _serializer.Serialize(@event);
         foreach (var subscription in matching)
@@ -194,50 +191,47 @@ public sealed class WebhookDispatchJob
 
 ## Public API
 
-| Type                                                       | Purpose                                                                |
-| ---------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `CreateWebhookSubscriptionCommand(url, events[], secret?)` | Subscribe (the secret is encrypted before storage)                     |
-| `DeleteWebhookSubscriptionCommand(id)`                     | Delete the subscription                                                |
-| `TestWebhookSubscriptionCommand(id)`                       | Send a synchronous `webhook.test` delivery (signed if a secret is set) |
-| `GetWebhookSubscriptionsQuery(paging)`                     | List subscriptions for caller's tenant                                 |
-| `GetWebhookDeliveriesQuery(subscriptionId, paging)`        | Delivery log for one subscription                                      |
+| Type | Purpose |
+|---|---|
+| `CreateWebhookSubscriptionCommand(url, events[], secret?)` | Subscribe (the secret is encrypted before storage) |
+| `DeleteWebhookSubscriptionCommand(id)` | Delete the subscription |
+| `TestWebhookSubscriptionCommand(id)` | Send a synchronous `webhook.test` delivery (signed if a secret is set) |
+| `GetWebhookSubscriptionsQuery(paging)` | List subscriptions for caller's tenant |
+| `GetWebhookDeliveriesQuery(subscriptionId, paging)` | Delivery log for one subscription |
 
 ## Permissions
 
 Every endpoint is gated by a `Webhooks.*` permission (defined in `Modules.Webhooks.Contracts/Authorization/WebhooksPermissions.cs` and registered at module startup). `View` is a basic permission; the rest are assigned per role.
 
-| Permission        | Grants                                       |
-| ----------------- | -------------------------------------------- |
-| `Webhooks.View`   | List subscriptions and read the delivery log |
-| `Webhooks.Create` | Create a subscription                        |
-| `Webhooks.Delete` | Delete a subscription                        |
-| `Webhooks.Test`   | Send a one-off test delivery                 |
+| Permission | Grants |
+|---|---|
+| `Webhooks.View` | List subscriptions and read the delivery log |
+| `Webhooks.Create` | Create a subscription |
+| `Webhooks.Delete` | Delete a subscription |
+| `Webhooks.Test` | Send a one-off test delivery |
 
 <Callout type="warning" title="Grant the new permissions after upgrading">
-  Before this release the endpoints were authentication-only - any signed-in
-  user could manage every webhook in their tenant. They now require explicit
-  `Webhooks.*` permissions, so add them to the roles that should manage webhooks
-  or those users will get `403`.
+Before this release the endpoints were authentication-only - any signed-in user could manage every webhook in their tenant. They now require explicit `Webhooks.*` permissions, so add them to the roles that should manage webhooks or those users will get `403`.
 </Callout>
 
 ## Endpoints
 
-| Verb   | Route                                            | What it does                | Permission        |
-| ------ | ------------------------------------------------ | --------------------------- | ----------------- |
-| POST   | `/api/v1/webhooks/subscriptions`                 | Create subscription         | `Webhooks.Create` |
-| DELETE | `/api/v1/webhooks/subscriptions/{id}`            | Delete subscription         | `Webhooks.Delete` |
-| GET    | `/api/v1/webhooks/subscriptions`                 | List subscriptions          | `Webhooks.View`   |
-| GET    | `/api/v1/webhooks/subscriptions/{id}/deliveries` | Delivery log (newest first) | `Webhooks.View`   |
-| POST   | `/api/v1/webhooks/subscriptions/{id}/test`       | Test delivery               | `Webhooks.Test`   |
+| Verb | Route | What it does | Permission |
+|---|---|---|---|
+| POST | `/api/v1/webhooks/subscriptions` | Create subscription | `Webhooks.Create` |
+| DELETE | `/api/v1/webhooks/subscriptions/{id}` | Delete subscription | `Webhooks.Delete` |
+| GET | `/api/v1/webhooks/subscriptions` | List subscriptions | `Webhooks.View` |
+| GET | `/api/v1/webhooks/subscriptions/{id}/deliveries` | Delivery log (newest first) | `Webhooks.View` |
+| POST | `/api/v1/webhooks/subscriptions/{id}/test` | Test delivery | `Webhooks.Test` |
 
 ## Headers on every delivery
 
-| Header                  | Value                                                                     |
-| ----------------------- | ------------------------------------------------------------------------- |
-| `Content-Type`          | `application/json`                                                        |
-| `X-Webhook-Event`       | The event type name (e.g. `ProductRepricedIntegrationEvent`)              |
+| Header | Value |
+|---|---|
+| `Content-Type` | `application/json` |
+| `X-Webhook-Event` | The event type name (e.g. `ProductRepricedIntegrationEvent`) |
 | `X-Webhook-Delivery-Id` | The `WebhookDelivery` row id - fresh per attempt, so receivers can dedupe |
-| `X-Webhook-Signature`   | `sha256={hex}` (only if `SecretHash` is set on the subscription)          |
+| `X-Webhook-Signature` | `sha256={hex}` (only if `SecretHash` is set on the subscription) |
 
 Subscribers verify the signature by HMAC-SHA256-hashing the raw request body with the same secret and comparing.
 

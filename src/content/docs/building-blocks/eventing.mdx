@@ -7,9 +7,9 @@ sidebar:
   order: 7
 pageType: reference
 seo:
-  title: "Event bus + Outbox/Inbox in .NET 10 - InMemory or RabbitMQ"
-  description: "How the Eventing block ships an in-memory or RabbitMQ event bus, EF Core outbox/inbox stores for transactional delivery, and the open-generic handler…"
-  keywords: ".net event bus, rabbitmq dotnet integration events, outbox pattern ef core, inbox idempotency .net, in-memory event bus dotnet"
+  title: 'Event bus + Outbox/Inbox in .NET 10 - InMemory or RabbitMQ'
+  description: 'How the Eventing block ships an in-memory or RabbitMQ event bus, EF Core outbox/inbox stores for transactional delivery, and the open-generic handler…'
+  keywords: '.net event bus, rabbitmq dotnet integration events, outbox pattern ef core, inbox idempotency .net, in-memory event bus dotnet'
 ---
 
 The Eventing block is the runtime side of the kit's integration-event story. It ships two `IEventBus` implementations - `InMemoryEventBus` (awaited, in-process) and `RabbitMqEventBus` (durable, cross-service) - an EF Core-backed outbox store for transactional delivery, an inbox store for receiver-side idempotency, a `JsonEventSerializer`, and the auto-discovery hook that registers every `IIntegrationEventHandler<TEvent>` in your module assemblies.
@@ -17,8 +17,8 @@ The Eventing block is the runtime side of the kit's integration-event story. It 
 <Callout type="note" title="Proposed dispatch contract, not a released feature">
   The resolved-tenant dispatch contract below describes [backend commit
   9e7eca14](https://github.com/HiroshiYoshino/dotnet-starter-kit/commit/9e7eca147551789f525610d12aa0c5f94913e37c).
-  These documentation changes accompany the proposed backend fix; they are not
-  a release announcement. Deploy the matching backend implementation before
+  These documentation changes accompany the proposed backend fix; they are not a
+  release announcement. Deploy the matching backend implementation before
   relying on this contract.
 </Callout>
 
@@ -59,7 +59,7 @@ The Eventing block is the runtime side of the kit's integration-event story. It 
 
 ## Drain targets and multi-instance safety
 
-Because outbox rows follow the tenant connection, the dispatcher can't poll a single database. Each cycle it asks **`IEventingDrainTargetProvider`** which databases to drain and runs one pass per target inside **`IEventingDrainScope`**, which installs the tenant context _before_ the scope builds its `EventingDbContext` (that context captures `TenantInfo`, and with it the connection string, at construction). BuildingBlocks defaults to a single target; the Multitenancy module replaces it with the default database plus one target per distinct **active** per-tenant connection string - tenants sharing a database collapse to one pass. An unreachable tenant database is logged and skipped, never fatal to the cycle.
+Because outbox rows follow the tenant connection, the dispatcher can't poll a single database. Each cycle it asks **`IEventingDrainTargetProvider`** which databases to drain and runs one pass per target inside **`IEventingDrainScope`**, which installs the tenant context *before* the scope builds its `EventingDbContext` (that context captures `TenantInfo`, and with it the connection string, at construction). BuildingBlocks defaults to a single target; the Multitenancy module replaces it with the default database plus one target per distinct **active** per-tenant connection string - tenants sharing a database collapse to one pass. An unreachable tenant database is logged and skipped, never fatal to the cycle.
 
 `ClaimBatchAsync` leases rows with Postgres `FOR UPDATE SKIP LOCKED` in one `UPDATE … RETURNING`, so several API instances partition a batch instead of all publishing the same message. The lease is an expiry (`OutboxClaimLeaseSeconds`, default 300), so a dispatcher that dies mid-batch has its rows recovered rather than stranded. Providers without `SKIP LOCKED` fall back to an unclaimed read and log a warning that only one instance is safe.
 
@@ -111,7 +111,7 @@ This dispatch fix adds no schema migration, new configuration, distributed trans
 
 ## How modules consume Eventing
 
-Publishing needs **no module registration at all** - the host calls `AddEventingCore` once. A module that _handles_ events registers its handlers:
+Publishing needs **no module registration at all** - the host calls `AddEventingCore` once. A module that *handles* events registers its handlers:
 
 ```csharp
 public void ConfigureServices(IHostApplicationBuilder builder)
@@ -163,12 +163,12 @@ builder.Services.AddIntegrationEventHandlers(moduleAssemblies);
 ```jsonc
 {
   "EventingOptions": {
-    "Provider": "InMemory", // or "RabbitMQ"
+    "Provider": "InMemory",                       // or "RabbitMQ"
     "OutboxBatchSize": 100,
     "OutboxMaxRetries": 5,
-    "OutboxRetryBaseDelaySeconds": 30, // exponential backoff after a failure
+    "OutboxRetryBaseDelaySeconds": 30,            // exponential backoff after a failure
     "OutboxRetryMaxDelaySeconds": 3600,
-    "OutboxClaimLeaseSeconds": 300, // must exceed worst-case time to publish a batch
+    "OutboxClaimLeaseSeconds": 300,               // must exceed worst-case time to publish a batch
     "EnableInbox": true,
     "OutboxDispatchIntervalSeconds": 10,
     "UseHostedServiceDispatcher": true,
@@ -182,9 +182,9 @@ builder.Services.AddIntegrationEventHandlers(moduleAssemblies);
       "QueuePrefix": "fsh",
       "UseSsl": false,
       "PublishRetryCount": 3,
-      "PublishRetryDelayMs": 1000,
-    },
-  },
+      "PublishRetryDelayMs": 1000
+    }
+  }
 }
 ```
 

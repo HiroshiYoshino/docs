@@ -7,28 +7,22 @@ sidebar:
   order: 6
 pageType: reference
 seo:
-  title: "Cross-module event contracts in .NET 10"
-  description: "The Eventing.Abstractions block ships dependency-free interfaces (IIntegrationEvent, IIntegrationEventHandler, IEventBus, IEventSerializer) that contracts…"
-  keywords: "integration event interface dotnet, ieventbus .net, event-driven architecture .net 10, dependency free event contracts"
+  title: 'Cross-module event contracts in .NET 10'
+  description: 'The Eventing.Abstractions block ships dependency-free interfaces (IIntegrationEvent, IIntegrationEventHandler, IEventBus, IEventSerializer) that contracts…'
+  keywords: 'integration event interface dotnet, ieventbus .net, event-driven architecture .net 10, dependency free event contracts'
 ---
 
 The Eventing.Abstractions block exists for one reason: **contracts assemblies should not pull in EF Core, RabbitMQ, or the Eventing runtime when they declare an event.** This block has zero NuGet dependencies - just five interfaces. It's the smallest building block in the kit.
 
 <Callout type="note" title="Proposed dispatch contract, not a released feature">
-    The `ExecuteAsync` addition below describes [backend commit
-    9e7eca14](https://github.com/HiroshiYoshino/dotnet-starter-kit/commit/9e7eca147551789f525610d12aa0c5f94913e37c).
-    These documentation changes accompany the proposed backend fix; they are not
-    a release announcement. Use the matching backend implementation for this API.
+  The `ExecuteAsync` addition below describes [backend commit
+  9e7eca14](https://github.com/HiroshiYoshino/dotnet-starter-kit/commit/9e7eca147551789f525610d12aa0c5f94913e37c).
+  These documentation changes accompany the proposed backend fix; they are not a
+  release announcement. Use the matching backend implementation for this API.
 </Callout>
 
-<Callout
-  type="tip"
-  title="Reference this block from .Contracts, the runtime from the module"
->
-  A module's `*.Contracts` assembly references **only** `Eventing.Abstractions`.
-  The module's runtime assembly references both this block and the heavier
-  `Eventing` block (which carries the EF Core / RabbitMQ implementations). That
-  keeps cross-module dependencies one-way, contract-only, and lightweight.
+<Callout type="tip" title="Reference this block from .Contracts, the runtime from the module">
+A module's `*.Contracts` assembly references **only** `Eventing.Abstractions`. The module's runtime assembly references both this block and the heavier `Eventing` block (which carries the EF Core / RabbitMQ implementations). That keeps cross-module dependencies one-way, contract-only, and lightweight.
 </Callout>
 
 ## What it ships
